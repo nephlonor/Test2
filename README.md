@@ -43,6 +43,7 @@ There is no way around it that does not involve jailbreaking.
 | `src/relay/` | WebSocket rendezvous server. Pairs one controller with one agent per token, compared in constant time. |
 | `src/agent/` | Phone-side agent. Dials the relay, executes commands against local WDA. |
 | `src/backends/` | `DeviceBackend` implementations: `wda` (real phone), `relay` (across the relay), `mock` (no hardware). |
+| `src/cli/` | Operator CLI: generate tokens, run `doctor`, drive the phone by hand. |
 
 ## Running it
 
@@ -50,19 +51,24 @@ Install and check:
 
 ```bash
 npm install
-npm test          # 25 tests, including a full end-to-end run over real sockets
+npm test          # 31 tests, including a full end-to-end run over real sockets
 npm run typecheck
 npm run build
 ```
 
+Requires Node 22.6+ — the test runner loads the TypeScript sources directly via
+type stripping.
+
 ### 1. Relay (on a public host)
 
 ```bash
-RELAY_TOKENS=$(openssl rand -hex 24) PORT=8787 npm run relay
+npm run cli -- token          # generate a pairing secret
+RELAY_TOKENS=<token> PORT=8787 npm run relay
 ```
 
 Put TLS in front of it. The relay speaks plain WebSocket and expects to sit
-behind a terminating proxy.
+behind a terminating proxy. It serves `GET /healthz` on the same port for load
+balancer checks.
 
 ### 2. Phone agent (where it can reach WebDriverAgent)
 
@@ -95,6 +101,46 @@ npm run agent
 skipping the relay) and `mock` (no hardware at all — useful for developing
 against the tool surface).
 
+### 4. Check it
+
+`doctor` walks the chain hop by hop, so a failure names the layer that broke
+rather than making you guess:
+
+```console
+$ npm run cli -- doctor
+backend: relay
+  ok  relay reachable (https://relay.example.com/healthz, HTTP 200)
+  ok  device responded: iPhone 15 Pro, iOS 18.0
+  ok  screen 393x852 pt
+  ok  accessibility tree readable (37 elements)
+
+All checks passed.
+```
+
+The same CLI drives the phone by hand — useful for shaking out WebDriverAgent
+without a model in the loop:
+
+```bash
+npm run cli -- describe              # list elements with tap targets
+npm run cli -- tap 196 420
+npm run cli -- launch com.apple.mobilesafari
+npm run cli -- screenshot out.png
+```
+
+## Staying connected
+
+A phone on cellular drops off without closing its socket, and the relay would
+otherwise keep routing commands into a connection that no longer exists. Both
+directions are covered:
+
+- The relay pings every endpoint every 30s and terminates anything that misses
+  two consecutive sweeps.
+- The agent runs an idle watchdog and `terminate()`s a silent relay connection
+  rather than waiting on a close handshake that will never arrive, then
+  reconnects with exponential backoff.
+- Frames are capped (16 MB default) so an oversized screenshot cannot wedge the
+  relay.
+
 ## How the model is meant to use it
 
 `describe_screen` returns the accessibility tree flattened to visible, labelled
@@ -125,7 +171,12 @@ per device pair.
 
 ## Status
 
-The transport, protocol, relay, MCP surface, and mock device are complete and
-tested end to end. The WDA backend is written against WebDriverAgent's
-documented HTTP endpoints and unit-tested against a fake, but it has not been
-exercised against physical hardware in this repository.
+The transport, protocol, relay, MCP surface, CLI, and mock device are complete
+and tested end to end, including heartbeat/reconnect behaviour under simulated
+network loss.
+
+The WDA backend is written against WebDriverAgent's documented HTTP endpoints
+and unit-tested against a fake that reproduces its quirks (errors returned with
+HTTP 200, booleans as `"1"`), but it has **not** been exercised against physical
+hardware in this repository — there is no iPhone in CI. `npm run cli -- doctor`
+is the first thing to run once a real device is attached.

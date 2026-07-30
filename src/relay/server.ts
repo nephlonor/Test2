@@ -1,4 +1,5 @@
 import { createHash, timingSafeEqual } from "node:crypto";
+import { createServer, type Server } from "node:http";
 import { WebSocketServer, type WebSocket } from "ws";
 import { encodeEnvelope, parseEnvelope, type Envelope, type Hello } from "../protocol.ts";
 
@@ -13,6 +14,16 @@ export interface RelayOptions {
   allowedTokens?: string[];
   /** Time an endpoint has to send `hello` before it is dropped. */
   helloTimeoutMs?: number;
+  /**
+   * How often to ping each endpoint. An endpoint that misses two consecutive
+   * pings is terminated. Set to 0 to disable.
+   */
+  heartbeatMs?: number;
+  /**
+   * Largest frame the relay will accept. Screenshots dominate: a full-res PNG
+   * from a modern iPhone is a few MB once base64-encoded.
+   */
+  maxPayloadBytes?: number;
   logger?: (message: string) => void;
 }
 
@@ -20,6 +31,8 @@ interface Endpoint {
   socket: WebSocket;
   role: Hello["role"];
   label: string;
+  /** Cleared on pong; a second sweep without a pong terminates the socket. */
+  awaitingPong: boolean;
 }
 
 /** One controller plus one agent sharing a pairing token. */
@@ -38,9 +51,13 @@ interface Pair {
  */
 export class RelayServer {
   #wss: WebSocketServer | null = null;
+  #http: Server | null = null;
   #pairs = new Map<string, Pair>();
   #allowed: Buffer[] | null;
   #helloTimeoutMs: number;
+  #heartbeatMs: number;
+  #maxPayloadBytes: number;
+  #heartbeat: NodeJS.Timeout | null = null;
   #log: (message: string) => void;
   #port: number;
   #host: string;
@@ -49,6 +66,8 @@ export class RelayServer {
     this.#port = options.port ?? 8787;
     this.#host = options.host ?? "0.0.0.0";
     this.#helloTimeoutMs = options.helloTimeoutMs ?? 10_000;
+    this.#heartbeatMs = options.heartbeatMs ?? 30_000;
+    this.#maxPayloadBytes = options.maxPayloadBytes ?? 16 * 1024 * 1024;
     this.#log = options.logger ?? ((m) => console.error(`[relay] ${m}`));
     this.#allowed =
       options.allowedTokens && options.allowedTokens.length > 0
@@ -58,14 +77,37 @@ export class RelayServer {
 
   /** Resolves with the port actually bound (useful when port 0 is requested). */
   async listen(): Promise<number> {
-    const wss = new WebSocketServer({ port: this.#port, host: this.#host });
-    this.#wss = wss;
-    await new Promise<void>((resolve, reject) => {
-      wss.once("listening", resolve);
-      wss.once("error", reject);
+    // An HTTP server underneath gives load balancers something to health-check;
+    // WebSocket upgrades ride on the same port.
+    const http = createServer((req, res) => {
+      if (req.url === "/healthz") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ ok: true, pairs: this.#pairs.size }));
+        return;
+      }
+      res.writeHead(404).end();
     });
+    this.#http = http;
+
+    const wss = new WebSocketServer({ server: http, maxPayload: this.#maxPayloadBytes });
+    this.#wss = wss;
+
+    await new Promise<void>((resolve, reject) => {
+      http.once("error", reject);
+      http.listen(this.#port, this.#host, () => {
+        http.removeListener("error", reject);
+        resolve();
+      });
+    });
+
     wss.on("connection", (socket) => this.#onConnection(socket));
-    const address = wss.address();
+
+    if (this.#heartbeatMs > 0) {
+      this.#heartbeat = setInterval(() => this.#sweep(), this.#heartbeatMs);
+      this.#heartbeat.unref?.();
+    }
+
+    const address = http.address();
     const port = typeof address === "object" && address ? address.port : this.#port;
     this.#log(`listening on ${this.#host}:${port}`);
     return port;
@@ -73,14 +115,44 @@ export class RelayServer {
 
   async close(): Promise<void> {
     const wss = this.#wss;
-    if (!wss) return;
+    const http = this.#http;
+    if (!wss || !http) return;
     this.#wss = null;
+    this.#http = null;
+    if (this.#heartbeat) clearInterval(this.#heartbeat);
+    this.#heartbeat = null;
+
     for (const pair of this.#pairs.values()) {
       pair.controller?.socket.close(1001, "relay shutting down");
       pair.agent?.socket.close(1001, "relay shutting down");
     }
     this.#pairs.clear();
     await new Promise<void>((resolve) => wss.close(() => resolve()));
+    await new Promise<void>((resolve) => http.close(() => resolve()));
+  }
+
+  /**
+   * Drops endpoints that stopped answering pings. Without this a phone that
+   * loses cellular leaves a half-open socket, and the relay keeps routing
+   * commands into a void until TCP eventually gives up minutes later.
+   */
+  #sweep(): void {
+    for (const pair of this.#pairs.values()) {
+      for (const endpoint of [pair.controller, pair.agent]) {
+        if (!endpoint) continue;
+        if (endpoint.awaitingPong) {
+          this.#log(`${endpoint.role} "${endpoint.label}" missed heartbeat; terminating`);
+          endpoint.socket.terminate();
+          continue;
+        }
+        endpoint.awaitingPong = true;
+        try {
+          endpoint.socket.ping();
+        } catch {
+          endpoint.socket.terminate();
+        }
+      }
+    }
   }
 
   #onConnection(socket: WebSocket): void {
@@ -117,6 +189,7 @@ export class RelayServer {
           socket,
           role: envelope.role,
           label: envelope.label ?? envelope.role,
+          awaitingPong: false,
         };
         this.#register(tokenKey, endpoint);
         return;
@@ -142,6 +215,10 @@ export class RelayServer {
         return;
       }
       peer.socket.send(encodeEnvelope(envelope));
+    });
+
+    socket.on("pong", () => {
+      if (endpoint) endpoint.awaitingPong = false;
     });
 
     socket.on("close", () => {

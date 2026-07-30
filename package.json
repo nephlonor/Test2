@@ -5,12 +5,13 @@
   "type": "module",
   "description": "Drive a physical iPhone from a remote Claude session over a relay.",
   "engines": {
-    "node": ">=20"
+    "node": ">=22.6"
   },
   "bin": {
     "iphone-control-mcp": "./dist/mcp/main.js",
     "iphone-control-relay": "./dist/relay/main.js",
-    "iphone-control-agent": "./dist/agent/main.js"
+    "iphone-control-agent": "./dist/agent/main.js",
+    "iphone-control": "./dist/cli/main.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
@@ -18,7 +19,8 @@
     "test": "node --test --experimental-strip-types \"test/**/*.test.ts\"",
     "relay": "node --experimental-strip-types src/relay/main.ts",
     "agent": "node --experimental-strip-types src/agent/main.ts",
-    "mcp": "node --experimental-strip-types src/mcp/main.ts"
+    "mcp": "node --experimental-strip-types src/mcp/main.ts",
+    "cli": "node --experimental-strip-types src/cli/main.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",

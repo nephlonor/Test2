@@ -7,6 +7,11 @@ export interface PhoneAgentOptions {
   token: string;
   label?: string;
   backend: DeviceBackend;
+  /**
+   * Terminate the connection if nothing (not even a ping) arrives from the
+   * relay in this long. Should exceed the relay's heartbeat interval.
+   */
+  idleTimeoutMs?: number;
   logger?: (message: string) => void;
   WebSocketImpl?: typeof WebSocket;
 }
@@ -26,11 +31,14 @@ export class PhoneAgent {
   #log: (message: string) => void;
   #WebSocketImpl: typeof WebSocket;
   #retryTimer: NodeJS.Timeout | null = null;
+  #idleTimer: NodeJS.Timeout | null = null;
+  #idleTimeoutMs: number;
 
   readonly #options: PhoneAgentOptions;
 
   constructor(options: PhoneAgentOptions) {
     this.#options = options;
+    this.#idleTimeoutMs = options.idleTimeoutMs ?? 75_000;
     this.#log = options.logger ?? ((m) => console.error(`[agent] ${m}`));
     this.#WebSocketImpl = options.WebSocketImpl ?? WebSocket;
   }
@@ -52,14 +60,21 @@ export class PhoneAgent {
           }),
         );
         this.#log(`connected to relay at ${this.#options.url}`);
+        this.#touch();
         resolve();
       });
 
       socket.on("message", (data) => {
+        this.#touch();
         void this.#onMessage(data.toString());
       });
 
+      // ws answers pings automatically; we only need them as a liveness signal.
+      socket.on("ping", () => this.#touch());
+      socket.on("pong", () => this.#touch());
+
       socket.on("close", (code, reason) => {
+        this.#clearIdleTimer();
         if (this.#socket === socket) this.#socket = null;
         this.#log(`relay connection closed (${reason.toString() || `code ${code}`})`);
         reject(new Error(`relay connection closed (code ${code})`));
@@ -71,8 +86,27 @@ export class PhoneAgent {
     });
   }
 
+  /** Restarts the idle watchdog; any traffic counts as proof of life. */
+  #touch(): void {
+    if (this.#idleTimeoutMs <= 0 || this.#closed) return;
+    this.#clearIdleTimer();
+    this.#idleTimer = setTimeout(() => {
+      this.#log(`no traffic from relay in ${this.#idleTimeoutMs}ms; reconnecting`);
+      // terminate(), not close(): a half-open socket will not complete a
+      // closing handshake, and we would wait forever for the reply.
+      this.#socket?.terminate();
+    }, this.#idleTimeoutMs);
+    this.#idleTimer.unref?.();
+  }
+
+  #clearIdleTimer(): void {
+    if (this.#idleTimer) clearTimeout(this.#idleTimer);
+    this.#idleTimer = null;
+  }
+
   async close(): Promise<void> {
     this.#closed = true;
+    this.#clearIdleTimer();
     if (this.#retryTimer) clearTimeout(this.#retryTimer);
     this.#socket?.close(1000, "agent shutting down");
     this.#socket = null;

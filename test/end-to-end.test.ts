@@ -127,7 +127,11 @@ test("the relay rejects an unknown pairing token", async () => {
     requestTimeoutMs: 1_000,
   });
 
-  await assert.rejects(() => controller.execute({ kind: "deviceInfo" }));
+  // The failure must name the token, not blame a missing phone, and must not
+  // wait out the peer timeout.
+  const started = Date.now();
+  await assert.rejects(() => controller.execute({ kind: "deviceInfo" }), /pairing token/);
+  assert.ok(Date.now() - started < 900, "auth failure should be reported promptly");
   await controller.close();
 });
 

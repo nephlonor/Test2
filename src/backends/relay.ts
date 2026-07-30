@@ -42,7 +42,7 @@ export class RelayBackend implements DeviceBackend {
   #socket: WebSocket | null = null;
   #pending = new Map<string, Pending>();
   #peerConnected = false;
-  #peerWaiters: Array<() => void> = [];
+  #peerWaiters: Array<{ resolve: () => void; reject: (error: Error) => void }> = [];
   #closed = false;
   #connectPromise: Promise<void> | null = null;
   #reconnectAttempt = 0;
@@ -121,8 +121,15 @@ export class RelayBackend implements DeviceBackend {
         this.#peerConnected = false;
         if (this.#socket === socket) this.#socket = null;
         const detail = reason.toString() || `code ${code}`;
-        this.#failAllPending(new Error(`relay connection closed (${detail})`));
-        reject(new Error(`relay connection closed (${detail})`));
+        // 4003 is the relay refusing our pairing token. Retrying cannot help,
+        // and waiting out the peer timeout would report it as a missing phone.
+        const error =
+          code === 4003
+            ? new Error("relay rejected the pairing token — check RELAY_TOKEN matches the relay")
+            : new Error(`relay connection closed (${detail})`);
+        this.#failAllPending(error);
+        this.#failPeerWaiters(error);
+        reject(error);
         if (!this.#closed && code !== 4003) this.#scheduleReconnect();
       });
 
@@ -156,7 +163,7 @@ export class RelayBackend implements DeviceBackend {
     if (envelope.type === "peer") {
       this.#peerConnected = envelope.state === "connected";
       if (this.#peerConnected) {
-        for (const wake of this.#peerWaiters.splice(0)) wake();
+        for (const waiter of this.#peerWaiters.splice(0)) waiter.resolve();
       }
       return;
     }
@@ -181,7 +188,7 @@ export class RelayBackend implements DeviceBackend {
     if (this.#peerConnected) return Promise.resolve();
     return new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => {
-        this.#peerWaiters = this.#peerWaiters.filter((w) => w !== wake);
+        this.#peerWaiters = this.#peerWaiters.filter((w) => w !== waiter);
         reject(
           new DeviceError(
             `phone agent did not connect within ${this.#options.peerTimeoutMs}ms — is the agent running on the device?`,
@@ -190,12 +197,22 @@ export class RelayBackend implements DeviceBackend {
         );
       }, this.#options.peerTimeoutMs);
 
-      const wake = () => {
-        clearTimeout(timer);
-        resolve();
+      const waiter = {
+        resolve: () => {
+          clearTimeout(timer);
+          resolve();
+        },
+        reject: (error: Error) => {
+          clearTimeout(timer);
+          reject(error instanceof DeviceError ? error : new DeviceError(error.message, kind));
+        },
       };
-      this.#peerWaiters.push(wake);
+      this.#peerWaiters.push(waiter);
     });
+  }
+
+  #failPeerWaiters(error: Error): void {
+    for (const waiter of this.#peerWaiters.splice(0)) waiter.reject(error);
   }
 
   #failAllPending(error: Error): void {
