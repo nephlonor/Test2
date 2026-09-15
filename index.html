@@ -1,0 +1,387 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Impact Strobe</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;700&family=Barlow:wght@400;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#E6ECE8; --panel:#F6F8F6; --ink:#13201A; --mid:#5B6B62; --line:#C3CEC7;
+  --signal:#E8590C; --turf:#2F6B45;
+  --num:"Barlow Condensed","Arial Narrow",system-ui,sans-serif;
+  --body:"Barlow",-apple-system,system-ui,sans-serif;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --bg:#0F1813; --panel:#18241D; --ink:#E4ECE6; --mid:#90A197; --line:#2C3B32; --signal:#FF7A33; --turf:#5FAF7C;
+}}
+:root[data-theme="dark"]{--bg:#0F1813;--panel:#18241D;--ink:#E4ECE6;--mid:#90A197;--line:#2C3B32;--signal:#FF7A33;--turf:#5FAF7C}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.4 var(--body)}
+body{padding:max(12px,env(safe-area-inset-top)) max(12px,env(safe-area-inset-right)) 24px max(12px,env(safe-area-inset-left))}
+.wrap{max-width:1100px;margin:0 auto;display:grid;gap:12px}
+header{display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap}
+h1{font:700 1.9rem/1 var(--num);margin:0;letter-spacing:.01em}
+.tabs{display:flex;border:1.5px solid var(--ink);border-radius:999px;overflow:hidden}
+.tabs button{border:0;background:transparent;color:var(--ink);font:600 .95rem var(--body);padding:8px 16px;cursor:pointer}
+.tabs button[aria-pressed="true"]{background:var(--ink);color:var(--bg)}
+.grid{display:grid;gap:12px;grid-template-columns:1fr}
+@media (min-width:760px){.grid{grid-template-columns:1.7fr 1fr}}
+.stage{position:relative;background:#000;border-radius:14px;overflow:hidden;aspect-ratio:16/9}
+.stage video,.stage img{position:absolute;inset:0;width:100%;height:100%;object-fit:contain}
+.stage img{display:none;background:#000}
+.stage.showing img{display:block}
+.stage .empty{position:absolute;inset:0;display:grid;place-items:center;color:#9aa;text-align:center;padding:20px;font-size:.95rem}
+.side{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:14px;display:grid;gap:14px;align-content:start}
+.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.stat span{display:block;color:var(--mid);font-size:.8rem}
+.stat b{font:700 2rem/1 var(--num)}
+.stat small{font:500 .9rem var(--num);color:var(--mid);margin-left:2px}
+/* the one bold element: the sound bar */
+.meter{position:relative;height:46px;border-radius:8px;background:var(--bg);border:1px solid var(--line);overflow:hidden}
+.meter i{position:absolute;inset:0 auto 0 0;width:0;background:var(--turf);transition:width 40ms linear}
+.meter.hit i{background:var(--signal)}
+.meter em{position:absolute;top:0;bottom:0;width:3px;background:var(--signal)}
+.meter .lab{position:absolute;right:8px;top:50%;transform:translateY(-50%);font:700 1.1rem var(--num);mix-blend-mode:difference;color:#fff}
+.row{display:flex;gap:8px;flex-wrap:wrap}
+.btn{flex:1 1 auto;border:1.5px solid var(--ink);background:transparent;color:var(--ink);border-radius:10px;padding:11px 14px;font:600 1rem var(--body);cursor:pointer;min-height:46px}
+.btn.primary{background:var(--ink);color:var(--bg)}
+.btn.armed{background:var(--signal);border-color:var(--signal);color:#fff}
+.btn:disabled{opacity:.4;cursor:default}
+.btn:focus-visible,.tabs button:focus-visible,input:focus-visible{outline:3px solid var(--signal);outline-offset:2px}
+label.ctl{display:grid;grid-template-columns:1fr auto;gap:2px 10px;font-size:.9rem;color:var(--mid)}
+label.ctl output{font:700 1.05rem var(--num);color:var(--ink)}
+label.ctl input{grid-column:1/-1;width:100%;accent-color:var(--signal)}
+.status{font-size:.9rem;color:var(--mid);min-height:1.3em}
+.status.err{color:var(--signal)}
+details{font-size:.9rem;color:var(--mid)}
+details summary{cursor:pointer;color:var(--ink);font-weight:600}
+input[type=file]{font:inherit;color:var(--ink);max-width:100%}
+[hidden]{display:none!important}
+@media (prefers-reduced-motion:reduce){.meter i{transition:none}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Impact Strobe</h1>
+    <div class="tabs" role="group" aria-label="Modus">
+      <button id="tabLive" aria-pressed="true">Live-Kamera</button>
+      <button id="tabImp" aria-pressed="false">Video importieren</button>
+    </div>
+  </header>
+
+  <div class="grid">
+    <div class="stage" id="stage">
+      <video id="vid" playsinline muted></video>
+      <img id="outImg" alt="Überlagerung der Frames um den Treffmoment">
+      <div class="empty" id="empty">Kamera starten, iPhone aufs Stativ, Ball ins Bild.</div>
+    </div>
+
+    <div class="side">
+      <!-- LIVE -->
+      <div id="paneLive" class="side" style="padding:0;border:0;background:none">
+        <div class="stats">
+          <div class="stat"><span>Kamera</span><b id="sFps">–</b><small>fps</small></div>
+          <div class="stat"><span>Frames</span><b id="sN">–</b></div>
+          <div class="stat"><span>Abstand</span><b id="sDt">–</b><small>ms</small></div>
+        </div>
+        <div>
+          <div class="meter" id="meter"><i id="meterFill"></i><em id="meterThr"></em><span class="lab" id="meterLab">–</span></div>
+        </div>
+        <label class="ctl">Auslöseschwelle <output id="oThr">0.35</output>
+          <input type="range" id="thr" min="0.02" max="1" step="0.01" value="0.35"></label>
+        <div class="row">
+          <button class="btn primary" id="bStart">Kamera starten</button>
+          <button class="btn" id="bArm" disabled>Scharf schalten</button>
+        </div>
+        <div class="row">
+          <button class="btn" id="bTest" disabled>Jetzt auslösen</button>
+          <button class="btn" id="bBack" disabled>Zurück zum Live-Bild</button>
+        </div>
+      </div>
+
+      <!-- IMPORT -->
+      <div id="paneImp" class="side" style="padding:0;border:0;background:none" hidden>
+        <input type="file" id="file" accept="video/*">
+        <label class="ctl">Position <output id="oPos">0.000 s</output>
+          <input type="range" id="scrub" min="0" max="1" step="0.001" value="0" disabled></label>
+        <div class="stats">
+          <div class="stat"><span>Video</span><b id="iFps">–</b><small>fps</small></div>
+          <div class="stat"><span>Treffer</span><b id="iHit">–</b><small>s</small></div>
+          <div class="stat"><span>Frames</span><b id="iN">–</b></div>
+        </div>
+        <div class="row">
+          <button class="btn" id="bSetHit" disabled>Treffer = Position</button>
+          <button class="btn primary" id="bBuild" disabled>Überlagerung erstellen</button>
+        </div>
+        <button class="btn" id="bBack2" disabled>Zurück zum Video</button>
+      </div>
+
+      <label class="ctl">Frames vor Treffer <output id="oPre">12</output>
+        <input type="range" id="pre" min="2" max="60" step="1" value="12"></label>
+      <label class="ctl">Frames nach Treffer <output id="oPost">5</output>
+        <input type="range" id="post" min="0" max="30" step="1" value="5"></label>
+      <label class="ctl">Bewegungsschwelle <output id="oDiff">70</output>
+        <input type="range" id="diff" min="15" max="200" step="1" value="70"></label>
+      <details>
+        <summary>Feinabstimmung</summary>
+        <label class="ctl" style="margin-top:10px">Audio-Versatz <output id="oOff">0 ms</output>
+          <input type="range" id="off" min="-80" max="80" step="1" value="0"></label>
+        <label class="ctl">Analysebreite <output id="oW">480 px</output>
+          <input type="range" id="wid" min="320" max="960" step="80" value="480"></label>
+      </details>
+      <div class="status" id="status" role="status"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const vid=$('vid'), stage=$('stage'), outImg=$('outImg'), statusEl=$('status');
+const S = { mode:'live', stream:null, actx:null, analyser:null, abuf:null, armed:false,
+  lastHit:-1e9, pending:false, ring:[], ringPos:0, W:480, H:270, frameTs:[],
+  file:null, hitT:null, frameDur:null };
+
+function status(msg,err){statusEl.textContent=msg||'';statusEl.classList.toggle('err',!!err)}
+function bindOut(inp,out,fmt){const u=()=>out.textContent=fmt(inp.value);inp.addEventListener('input',u);u()}
+bindOut($('thr'),$('oThr'),v=>(+v).toFixed(2));
+bindOut($('pre'),$('oPre'),v=>v);
+bindOut($('post'),$('oPost'),v=>v);
+bindOut($('diff'),$('oDiff'),v=>v);
+bindOut($('off'),$('oOff'),v=>v+' ms');
+bindOut($('wid'),$('oW'),v=>v+' px');
+const thrLine=()=>$('meterThr').style.left=(+$('thr').value*100)+'%';
+$('thr').addEventListener('input',thrLine);thrLine();
+
+/* ---------- mode tabs ---------- */
+function setMode(m){
+  S.mode=m;
+  $('tabLive').setAttribute('aria-pressed',m==='live');
+  $('tabImp').setAttribute('aria-pressed',m==='imp');
+  $('paneLive').hidden=m!=='live'; $('paneImp').hidden=m!=='imp';
+  stage.classList.remove('showing'); status('');
+  if(m==='imp'){ stopLive(); vid.srcObject=null; vid.muted=true; vid.controls=false;
+    $('empty').textContent='Zeitlupen-Video wählen (z. B. 240 fps aus der Kamera-App).';
+    $('empty').hidden=!!S.file;
+    if(S.file){vid.src=S.fileUrl;} }
+  else { vid.removeAttribute('src'); vid.load();
+    $('empty').textContent='Kamera starten, iPhone aufs Stativ, Ball ins Bild.'; $('empty').hidden=!!S.stream; }
+}
+$('tabLive').onclick=()=>setMode('live');
+$('tabImp').onclick=()=>setMode('imp');
+
+/* ---------- compositing ---------- */
+function composite(frames,W,H,thr){
+  const n=frames.length, P=W*H, out=new Uint8ClampedArray(P*4);
+  const k=Math.min(5,n), picks=[];
+  for(let i=0;i<k;i++) picks.push(frames[k===1?0:Math.round(i*(n-1)/(k-1))]);
+  const L=new Float32Array(k), idx=new Uint8Array(k);
+  // background = per-pixel luma-median of up to 5 frames spread across the window
+  for(let p=0,o=0;p<P;p++,o+=4){
+    for(let j=0;j<k;j++){const d=picks[j];L[j]=d[o]*.299+d[o+1]*.587+d[o+2]*.114;idx[j]=j;}
+    for(let a=1;a<k;a++){let b=a;while(b>0&&L[idx[b-1]]>L[idx[b]]){const t=idx[b];idx[b]=idx[b-1];idx[b-1]=t;b--;}}
+    const s=picks[idx[k>>1]];
+    out[o]=s[o];out[o+1]=s[o+1];out[o+2]=s[o+2];out[o+3]=255;
+  }
+  const bg=out.slice();
+  // paste moving pixels of every frame, later frames on top
+  for(const f of frames){
+    for(let o=0;o<P*4;o+=4){
+      const d=Math.abs(f[o]-bg[o])+Math.abs(f[o+1]-bg[o+1])+Math.abs(f[o+2]-bg[o+2]);
+      if(d>thr){out[o]=f[o];out[o+1]=f[o+1];out[o+2]=f[o+2];}
+    }
+  }
+  return out;
+}
+function showComposite(data,W,H){
+  const c=document.createElement('canvas');c.width=W;c.height=H;
+  c.getContext('2d').putImageData(new ImageData(data,W,H),0,0);
+  outImg.src=c.toDataURL('image/jpeg',0.92);
+  stage.classList.add('showing');
+}
+
+/* ---------- LIVE ---------- */
+const cap=document.createElement('canvas');
+let capCtx=cap.getContext('2d',{willReadFrequently:true});
+
+function allocRing(){
+  S.W=+$('wid').value; S.H=Math.round(S.W*(vid.videoHeight||720)/(vid.videoWidth||1280));
+  cap.width=S.W;cap.height=S.H;capCtx=cap.getContext('2d',{willReadFrequently:true});
+  const len=Math.max(120,(+$('pre').value+ +$('post').value)*3);
+  S.ring=Array.from({length:len},()=>({t:-1,d:null}));S.ringPos=0;
+}
+
+async function startLive(){
+  try{
+    status('Kamera wird gestartet …');
+    S.stream=await navigator.mediaDevices.getUserMedia({
+      video:{facingMode:'environment',width:{ideal:1280},height:{ideal:720},frameRate:{ideal:240}},
+      audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false}
+    });
+  }catch(e){status('Kein Zugriff auf Kamera/Mikrofon: '+e.message+'. Seite über https öffnen und Berechtigung erlauben.',true);return}
+  vid.srcObject=S.stream; await vid.play().catch(()=>{});
+  if(!vid.videoWidth) await new Promise(r=>vid.onloadedmetadata=r);
+  const st=S.stream.getVideoTracks()[0].getSettings();
+  $('sFps').textContent=st.frameRate?Math.round(st.frameRate):'?';
+  allocRing();
+  const AC=window.AudioContext||window.webkitAudioContext;
+  S.actx=new AC(); await S.actx.resume();
+  const src=S.actx.createMediaStreamSource(S.stream);
+  const hp=S.actx.createBiquadFilter();hp.type='highpass';hp.frequency.value=1500;
+  S.analyser=S.actx.createAnalyser();S.analyser.fftSize=2048;
+  src.connect(hp);hp.connect(S.analyser);
+  S.abuf=new Float32Array(S.analyser.fftSize);
+  $('empty').hidden=true;
+  ['bArm','bTest'].forEach(b=>$(b).disabled=false);
+  $('bStart').textContent='Kamera stoppen';
+  status('Bereit. Scharf schalten und schlagen.');
+  frameLoop(); audioLoop();
+}
+function stopLive(){
+  if(!S.stream)return;
+  S.stream.getTracks().forEach(t=>t.stop());S.stream=null;
+  if(S.actx){S.actx.close();S.actx=null}
+  S.armed=false;$('bArm').classList.remove('armed');$('bArm').textContent='Scharf schalten';
+  ['bArm','bTest','bBack'].forEach(b=>$(b).disabled=true);
+  $('bStart').textContent='Kamera starten';
+}
+$('bStart').onclick=()=>S.stream?(stopLive(),vid.srcObject=null,$('empty').hidden=false):startLive();
+$('bArm').onclick=()=>{S.armed=!S.armed;$('bArm').classList.toggle('armed',S.armed);$('bArm').textContent=S.armed?'Scharf – warte auf Knall':'Scharf schalten'};
+$('bTest').onclick=()=>trigger(performance.now()-(+$('post').value*frameMs())-10);
+$('bBack').onclick=()=>{stage.classList.remove('showing');$('bBack').disabled=true};
+$('wid').addEventListener('change',()=>{if(S.stream)allocRing()});
+['pre','post'].forEach(id=>$(id).addEventListener('change',()=>{if(S.stream)allocRing()}));
+
+function frameMs(){const t=S.frameTs;if(t.length<5)return 16.7;const d=[];for(let i=1;i<t.length;i++)d.push(t[i]-t[i-1]);d.sort((a,b)=>a-b);return d[d.length>>1]}
+
+function grab(t){
+  if(!S.ring.length)return;
+  capCtx.drawImage(vid,0,0,S.W,S.H);
+  const img=capCtx.getImageData(0,0,S.W,S.H).data;
+  const slot=S.ring[S.ringPos];
+  if(!slot.d||slot.d.length!==img.length)slot.d=new Uint8ClampedArray(img.length);
+  slot.d.set(img);slot.t=t;S.ringPos=(S.ringPos+1)%S.ring.length;
+  S.frameTs.push(t);if(S.frameTs.length>30)S.frameTs.shift();
+}
+function frameLoop(){
+  if(!S.stream)return;
+  if(vid.requestVideoFrameCallback){
+    const cb=(now,meta)=>{if(!S.stream)return;
+      grab(meta.captureTime||now);vid.requestVideoFrameCallback(cb)};
+    vid.requestVideoFrameCallback(cb);
+  }else{
+    let lastT=-1;const loop=()=>{if(!S.stream)return;
+      if(vid.currentTime!==lastT){lastT=vid.currentTime;grab(performance.now())}
+      requestAnimationFrame(loop)};loop();
+  }
+}
+function audioLoop(){
+  if(!S.analyser)return;
+  S.analyser.getFloatTimeDomainData(S.abuf);
+  const thr=+$('thr').value, buf=S.abuf;
+  let peak=0,first=-1;
+  for(let i=0;i<buf.length;i++){const a=Math.abs(buf[i]);if(a>peak)peak=a;if(first<0&&a>thr)first=i}
+  $('meterFill').style.width=Math.min(100,peak*100)+'%';
+  $('meterLab').textContent=peak.toFixed(2);
+  const now=performance.now();
+  if(S.armed&&first>=0&&!S.pending&&now-S.lastHit>1500){
+    const tHit=now-(buf.length-first)/S.actx.sampleRate*1000+(+$('off').value);
+    trigger(tHit);
+  }
+  requestAnimationFrame(audioLoop);
+}
+function trigger(tHit){
+  S.lastHit=performance.now();S.pending=true;
+  $('meter').classList.add('hit');setTimeout(()=>$('meter').classList.remove('hit'),400);
+  const fm=frameMs(), wait=(+$('post').value+2)*fm+60;
+  setTimeout(()=>{
+    const pre=+$('pre').value, post=+$('post').value;
+    const all=S.ring.filter(f=>f.t>0).sort((a,b)=>a.t-b.t);
+    let hi=all.findIndex(f=>f.t>=tHit); if(hi<0)hi=all.length-1;
+    const sel=all.slice(Math.max(0,hi-pre),hi+post+1);
+    S.pending=false;
+    if(sel.length<2){status('Zu wenige Frames im Puffer.',true);return}
+    const t0=performance.now();
+    const data=composite(sel.map(f=>f.d),S.W,S.H,+$('diff').value);
+    showComposite(data,S.W,S.H);
+    const dt=(sel[sel.length-1].t-sel[0].t)/(sel.length-1);
+    $('sN').textContent=sel.length;$('sDt').textContent=dt.toFixed(1);
+    $('bBack').disabled=false;
+    status(`Treffer erkannt. Effektiv ${(1000/dt).toFixed(0)} fps, Rechenzeit ${Math.round(performance.now()-t0)} ms. Lange drücken zum Sichern.`);
+  },wait);
+}
+
+/* ---------- IMPORT ---------- */
+$('file').onchange=async e=>{
+  const f=e.target.files[0];if(!f)return;
+  if(S.fileUrl)URL.revokeObjectURL(S.fileUrl);
+  S.file=f;S.fileUrl=URL.createObjectURL(f);S.hitT=null;S.frameDur=null;
+  stage.classList.remove('showing');$('empty').hidden=true;
+  vid.srcObject=null;vid.src=S.fileUrl;vid.muted=true;
+  await new Promise((r,j)=>{vid.onloadedmetadata=r;vid.onerror=()=>j(new Error('Video kann nicht gelesen werden'))}).catch(err=>{status(err.message,true)});
+  if(!vid.duration)return;
+  $('scrub').max=vid.duration.toFixed(3);$('scrub').disabled=false;
+  ['bSetHit','bBuild'].forEach(b=>$(b).disabled=false);
+  status('Frame-Rate wird gemessen …');
+  S.frameDur=await estimateFrameDur(vid);
+  $('iFps').textContent=Math.round(1/S.frameDur);
+  status('Tonspur wird analysiert …');
+  try{
+    const AC=window.AudioContext||window.webkitAudioContext;const ac=new AC();
+    const ab=await f.arrayBuffer();const buf=await ac.decodeAudioData(ab);ac.close();
+    const d=buf.getChannelData(0);let max=0,mi=0,prev=0;
+    for(let i=0;i<d.length;i++){const h=Math.abs(d[i]-prev);prev=d[i];if(h>max){max=h;mi=i}}
+    S.hitT=mi/buf.sampleRate+(+$('off').value)/1000;
+    $('iHit').textContent=S.hitT.toFixed(3);
+    await seek(vid,S.hitT);$('scrub').value=S.hitT;$('oPos').textContent=S.hitT.toFixed(3)+' s';
+    status('Lautester Klick gefunden. Position prüfen, dann Überlagerung erstellen.');
+  }catch(err){
+    status('Tonspur nicht lesbar. Treffer per Schieber suchen und "Treffer = Position" tippen.',true);
+  }
+};
+$('scrub').addEventListener('input',()=>{vid.currentTime=+$('scrub').value;$('oPos').textContent=(+$('scrub').value).toFixed(3)+' s';stage.classList.remove('showing')});
+$('bSetHit').onclick=()=>{S.hitT=+$('scrub').value;$('iHit').textContent=S.hitT.toFixed(3)};
+$('bBack2').onclick=()=>{stage.classList.remove('showing');$('bBack2').disabled=true};
+
+function estimateFrameDur(v){
+  return new Promise(res=>{
+    if(!v.requestVideoFrameCallback){res(1/30);return}
+    const ts=[];let done=false;
+    const finish=()=>{if(done)return;done=true;v.pause();
+      const d=[];for(let i=1;i<ts.length;i++){const x=ts[i]-ts[i-1];if(x>0.0005)d.push(x)}
+      d.sort((a,b)=>a-b);res(d.length?d[0]:1/30)};
+    const cb=(now,m)=>{ts.push(m.mediaTime);if(ts.length<30)v.requestVideoFrameCallback(cb);else finish()};
+    v.currentTime=0;v.requestVideoFrameCallback(cb);
+    v.play().catch(finish);setTimeout(finish,2500);
+  });
+}
+function seek(v,t){
+  return new Promise(r=>{
+    const done=()=>{v.removeEventListener('seeked',done);requestAnimationFrame(()=>requestAnimationFrame(r))};
+    v.addEventListener('seeked',done);v.currentTime=Math.max(0,Math.min(v.duration,t));
+    setTimeout(done,600);
+  });
+}
+$('bBuild').onclick=async()=>{
+  if(S.hitT==null){status('Zuerst Treffer setzen.',true);return}
+  const W=+$('wid').value,H=Math.round(W*vid.videoHeight/vid.videoWidth);
+  const c=document.createElement('canvas');c.width=W;c.height=H;const cx=c.getContext('2d',{willReadFrequently:true});
+  const pre=+$('pre').value,post=+$('post').value,fd=S.frameDur||1/30,frames=[];
+  $('bBuild').disabled=true;stage.classList.remove('showing');
+  for(let i=-pre;i<=post;i++){
+    status(`Frame ${i+pre+1} / ${pre+post+1} …`);
+    await seek(vid,S.hitT+i*fd);
+    cx.drawImage(vid,0,0,W,H);frames.push(cx.getImageData(0,0,W,H).data.slice());
+  }
+  const data=composite(frames,W,H,+$('diff').value);
+  showComposite(data,W,H);
+  $('iN').textContent=frames.length;$('bBuild').disabled=false;$('bBack2').disabled=false;
+  status(`Fertig: ${frames.length} Frames, je ${(fd*1000).toFixed(1)} ms. Lange drücken zum Sichern.`);
+};
+</script>
+</body>
+</html>
