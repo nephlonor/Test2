@@ -144,7 +144,45 @@ const $ = id => document.getElementById(id);
 const vid=$('vid'), stage=$('stage'), outImg=$('outImg'), statusEl=$('status');
 const S = { mode:'live', stream:null, actx:null, analyser:null, abuf:null, armed:false,
   lastHit:-1e9, pending:false, ring:[], ringPos:0, W:480, H:270, frameTs:[],
-  file:null, hitT:null, frameDur:null };
+  file:null, hitT:null, frameDur:null, rot:false };
+
+/* Portrait sources are turned a quarter turn so they fill the 16:9 stage
+   instead of sitting letterboxed between two black bars. Flip to -1 if the
+   picture comes out upside down for your tripod mount. */
+const ROT_DIR = 1;
+
+/* ---------- orientation ---------- */
+function srcSize(){
+  const vw=vid.videoWidth||1280, vh=vid.videoHeight||720;
+  return S.rot ? {w:vh,h:vw} : {w:vw,h:vh};
+}
+function fitVideo(){
+  const vw=vid.videoWidth, vh=vid.videoHeight;
+  S.rot = vw>0 && vh>vw;
+  const st=vid.style;
+  if(S.rot){
+    const r=stage.getBoundingClientRect();
+    st.width=r.height+'px'; st.height=r.width+'px';
+    st.left=((r.width-r.height)/2)+'px'; st.top=((r.height-r.width)/2)+'px';
+    st.right='auto'; st.bottom='auto';
+    st.objectFit='cover';
+    st.transform='rotate('+(ROT_DIR*90)+'deg)';
+  }else{
+    st.width=st.height=st.left=st.top=st.right=st.bottom='';
+    st.objectFit=''; st.transform='';
+  }
+}
+function drawFrame(ctx,W,H){
+  if(S.rot){
+    ctx.save();
+    ctx.translate(W/2,H/2);
+    ctx.rotate(ROT_DIR*Math.PI/2);
+    ctx.drawImage(vid,-H/2,-W/2,H,W);
+    ctx.restore();
+  }else ctx.drawImage(vid,0,0,W,H);
+}
+new ResizeObserver(()=>{if(S.rot)fitVideo()}).observe(stage);
+vid.addEventListener('loadedmetadata',fitVideo);
 
 function status(msg,err){statusEl.textContent=msg||'';statusEl.classList.toggle('err',!!err)}
 function bindOut(inp,out,fmt){const u=()=>out.textContent=fmt(inp.value);inp.addEventListener('input',u);u()}
@@ -168,7 +206,7 @@ function setMode(m){
     $('empty').textContent='Zeitlupen-Video wählen (z. B. 240 fps aus der Kamera-App).';
     $('empty').hidden=!!S.file;
     if(S.file){vid.src=S.fileUrl;} }
-  else { vid.removeAttribute('src'); vid.load();
+  else { vid.removeAttribute('src'); vid.load(); fitVideo();
     $('empty').textContent='Kamera starten, iPhone aufs Stativ, Ball ins Bild.'; $('empty').hidden=!!S.stream; }
 }
 $('tabLive').onclick=()=>setMode('live');
@@ -209,7 +247,8 @@ const cap=document.createElement('canvas');
 let capCtx=cap.getContext('2d',{willReadFrequently:true});
 
 function allocRing(){
-  S.W=+$('wid').value; S.H=Math.round(S.W*(vid.videoHeight||720)/(vid.videoWidth||1280));
+  const s=srcSize();
+  S.W=+$('wid').value; S.H=Math.round(S.W*s.h/s.w);
   cap.width=S.W;cap.height=S.H;capCtx=cap.getContext('2d',{willReadFrequently:true});
   const len=Math.max(120,(+$('pre').value+ +$('post').value)*3);
   S.ring=Array.from({length:len},()=>({t:-1,d:null}));S.ringPos=0;
@@ -227,7 +266,7 @@ async function startLive(){
   if(!vid.videoWidth) await new Promise(r=>vid.onloadedmetadata=r);
   const st=S.stream.getVideoTracks()[0].getSettings();
   $('sFps').textContent=st.frameRate?Math.round(st.frameRate):'?';
-  allocRing();
+  fitVideo(); allocRing();
   const AC=window.AudioContext||window.webkitAudioContext;
   S.actx=new AC(); await S.actx.resume();
   const src=S.actx.createMediaStreamSource(S.stream);
@@ -260,7 +299,7 @@ function frameMs(){const t=S.frameTs;if(t.length<5)return 16.7;const d=[];for(le
 
 function grab(t){
   if(!S.ring.length)return;
-  capCtx.drawImage(vid,0,0,S.W,S.H);
+  drawFrame(capCtx,S.W,S.H);
   const img=capCtx.getImageData(0,0,S.W,S.H).data;
   const slot=S.ring[S.ringPos];
   if(!slot.d||slot.d.length!==img.length)slot.d=new Uint8ClampedArray(img.length);
@@ -324,6 +363,7 @@ $('file').onchange=async e=>{
   vid.srcObject=null;vid.src=S.fileUrl;vid.muted=true;
   await new Promise((r,j)=>{vid.onloadedmetadata=r;vid.onerror=()=>j(new Error('Video kann nicht gelesen werden'))}).catch(err=>{status(err.message,true)});
   if(!vid.duration)return;
+  fitVideo();
   $('scrub').max=vid.duration.toFixed(3);$('scrub').disabled=false;
   ['bSetHit','bBuild'].forEach(b=>$(b).disabled=false);
   status('Frame-Rate wird gemessen …');
@@ -368,14 +408,14 @@ function seek(v,t){
 }
 $('bBuild').onclick=async()=>{
   if(S.hitT==null){status('Zuerst Treffer setzen.',true);return}
-  const W=+$('wid').value,H=Math.round(W*vid.videoHeight/vid.videoWidth);
+  const s=srcSize(),W=+$('wid').value,H=Math.round(W*s.h/s.w);
   const c=document.createElement('canvas');c.width=W;c.height=H;const cx=c.getContext('2d',{willReadFrequently:true});
   const pre=+$('pre').value,post=+$('post').value,fd=S.frameDur||1/30,frames=[];
   $('bBuild').disabled=true;stage.classList.remove('showing');
   for(let i=-pre;i<=post;i++){
     status(`Frame ${i+pre+1} / ${pre+post+1} …`);
     await seek(vid,S.hitT+i*fd);
-    cx.drawImage(vid,0,0,W,H);frames.push(cx.getImageData(0,0,W,H).data.slice());
+    drawFrame(cx,W,H);frames.push(cx.getImageData(0,0,W,H).data.slice());
   }
   const data=composite(frames,W,H,+$('diff').value);
   showComposite(data,W,H);
