@@ -92,8 +92,8 @@ input[type=file]{font:inherit;color:var(--ink);max-width:100%}
         <div>
           <div class="meter" id="meter"><i id="meterFill"></i><em id="meterThr"></em><span class="lab" id="meterLab">–</span></div>
         </div>
-        <label class="ctl">Auslöseschwelle <output id="oThr">0.35</output>
-          <input type="range" id="thr" min="0.02" max="1" step="0.01" value="0.35"></label>
+        <label class="ctl">Auslöseschwelle <output id="oThr">8,0× Rauschen</output>
+          <input type="range" id="thr" min="2" max="30" step="0.5" value="8"></label>
         <div class="row">
           <button class="btn primary" id="bStart">Kamera starten</button>
           <button class="btn" id="bArm" disabled>Scharf schalten</button>
@@ -144,7 +144,13 @@ const $ = id => document.getElementById(id);
 const vid=$('vid'), stage=$('stage'), outImg=$('outImg'), statusEl=$('status');
 const S = { mode:'live', stream:null, actx:null, analyser:null, abuf:null, armed:false,
   lastHit:-1e9, pending:false, ring:[], ringPos:0, W:480, H:270, frameTs:[],
-  file:null, hitT:null, frameDur:null, rot:false };
+  file:null, hitT:null, frameDur:null, rot:false, floor:8e-4 };
+
+/* The trigger level rides on the measured noise floor rather than on a fixed
+   amplitude, because mic gain varies hugely between phones and distances.
+   NOISE_MIN keeps the floor off zero; ABS_GATE stops a silent room from
+   triggering on its own hiss. */
+const NOISE_MIN=8e-4, ABS_GATE=4e-3;
 
 /* Portrait sources are turned a quarter turn so they fill the 16:9 stage
    instead of sitting letterboxed between two black bars. Flip to -1 if the
@@ -186,14 +192,17 @@ vid.addEventListener('loadedmetadata',fitVideo);
 
 function status(msg,err){statusEl.textContent=msg||'';statusEl.classList.toggle('err',!!err)}
 function bindOut(inp,out,fmt){const u=()=>out.textContent=fmt(inp.value);inp.addEventListener('input',u);u()}
-bindOut($('thr'),$('oThr'),v=>(+v).toFixed(2));
+bindOut($('thr'),$('oThr'),v=>(+v).toFixed(1)+'× Rauschen');
 bindOut($('pre'),$('oPre'),v=>v);
 bindOut($('post'),$('oPost'),v=>v);
 bindOut($('diff'),$('oDiff'),v=>v);
 bindOut($('off'),$('oOff'),v=>v+' ms');
 bindOut($('wid'),$('oW'),v=>v+' px');
-const thrLine=()=>$('meterThr').style.left=(+$('thr').value*100)+'%';
-$('thr').addEventListener('input',thrLine);thrLine();
+/* -80 dB .. 0 dB across the bar, so a quiet room is still visible */
+const dbPct=v=>Math.max(0,Math.min(100,(20*Math.log10(Math.max(v,1e-4))+80)/80*100));
+const gateLevel=()=>Math.max(S.floor*+$('thr').value,ABS_GATE);
+const paintThr=()=>$('meterThr').style.left=dbPct(gateLevel())+'%';
+$('thr').addEventListener('input',paintThr);paintThr();
 
 /* ---------- mode tabs ---------- */
 function setMode(m){
@@ -274,6 +283,7 @@ async function startLive(){
   S.analyser=S.actx.createAnalyser();S.analyser.fftSize=2048;
   src.connect(hp);hp.connect(S.analyser);
   S.abuf=new Float32Array(S.analyser.fftSize);
+  S.floor=NOISE_MIN;
   $('empty').hidden=true;
   ['bArm','bTest'].forEach(b=>$(b).disabled=false);
   $('bStart').textContent='Kamera stoppen';
@@ -321,11 +331,14 @@ function frameLoop(){
 function audioLoop(){
   if(!S.analyser)return;
   S.analyser.getFloatTimeDomainData(S.abuf);
-  const thr=+$('thr').value, buf=S.abuf;
+  const buf=S.abuf, gate=gateLevel();
   let peak=0,first=-1;
-  for(let i=0;i<buf.length;i++){const a=Math.abs(buf[i]);if(a>peak)peak=a;if(first<0&&a>thr)first=i}
-  $('meterFill').style.width=Math.min(100,peak*100)+'%';
-  $('meterLab').textContent=peak.toFixed(2);
+  for(let i=0;i<buf.length;i++){const a=Math.abs(buf[i]);if(a>peak)peak=a;if(first<0&&a>gate)first=i}
+  // falls fast, climbs slowly, so the crack itself cannot drag the floor up after it
+  S.floor=Math.max(NOISE_MIN, peak<S.floor ? S.floor*.9+peak*.1 : S.floor*.998+peak*.002);
+  $('meterFill').style.width=dbPct(peak)+'%';
+  $('meterLab').textContent=peak>1e-4?(20*Math.log10(peak)).toFixed(0)+' dB':'–';
+  paintThr();
   const now=performance.now();
   if(S.armed&&first>=0&&!S.pending&&now-S.lastHit>1500){
     const tHit=now-(buf.length-first)/S.actx.sampleRate*1000+(+$('off').value);
