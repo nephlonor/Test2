@@ -60,6 +60,7 @@ label.ctl input{grid-column:1/-1;width:100%;accent-color:var(--signal)}
 details{font-size:.9rem;color:var(--mid)}
 details summary{cursor:pointer;color:var(--ink);font-weight:600}
 input[type=file]{font:inherit;color:var(--ink);max-width:100%}
+label.ctl select{font:600 .95rem var(--body);color:var(--ink);background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:5px 8px}
 [hidden]{display:none!important}
 @media (prefers-reduced-motion:reduce){.meter i{transition:none}}
 </style>
@@ -92,8 +93,8 @@ input[type=file]{font:inherit;color:var(--ink);max-width:100%}
         <div>
           <div class="meter" id="meter"><i id="meterFill"></i><em id="meterThr"></em><span class="lab" id="meterLab">–</span></div>
         </div>
-        <label class="ctl">Auslöseschwelle <output id="oThr">8,0× Rauschen</output>
-          <input type="range" id="thr" min="2" max="30" step="0.5" value="8"></label>
+        <label class="ctl">Auslöseschwelle <output id="oThr">2,0× Rauschen</output>
+          <input type="range" id="thr" min="1.5" max="30" step="0.5" value="2"></label>
         <div class="row">
           <button class="btn primary" id="bStart">Kamera starten</button>
           <button class="btn" id="bArm" disabled>Scharf schalten</button>
@@ -107,6 +108,11 @@ input[type=file]{font:inherit;color:var(--ink);max-width:100%}
       <!-- IMPORT -->
       <div id="paneImp" class="side" style="padding:0;border:0;background:none" hidden>
         <input type="file" id="file" accept="video/*">
+        <label class="ctl">Aufnahme-Bildrate <select id="capFps">
+          <option value="0">Auto (aus Datei)</option>
+          <option value="120">120 fps</option>
+          <option value="240">240 fps</option>
+        </select></label>
         <label class="ctl">Position <output id="oPos">0.000 s</output>
           <input type="range" id="scrub" min="0" max="1" step="0.001" value="0" disabled></label>
         <div class="stats">
@@ -144,13 +150,18 @@ const $ = id => document.getElementById(id);
 const vid=$('vid'), stage=$('stage'), outImg=$('outImg'), statusEl=$('status');
 const S = { mode:'live', stream:null, actx:null, analyser:null, abuf:null, armed:false,
   lastHit:-1e9, pending:false, ring:[], ringPos:0, W:480, H:270, frameTs:[],
-  file:null, hitT:null, frameDur:null, rot:false, floor:8e-4 };
+  file:null, hitT:null, frameDur:null, rot:false, floor:8e-4, fps:0, peakI:0 };
 
 /* The trigger level rides on the measured noise floor rather than on a fixed
    amplitude, because mic gain varies hugely between phones and distances.
    NOISE_MIN keeps the floor off zero; ABS_GATE stops a silent room from
-   triggering on its own hiss. */
-const NOISE_MIN=8e-4, ABS_GATE=4e-3;
+   triggering on its own hiss. The floor is the median of the last FLOOR_WIN
+   polls (~2 s): a strike occupies three of them so it cannot lift the floor,
+   while a genuinely louder range moves it within a second. An averaged floor
+   was tried first and fails at low multipliers — it lags a noisy environment
+   by seconds and fires continuously until it catches up. */
+const NOISE_MIN=8e-4, ABS_GATE=4e-3, FLOOR_WIN=120;
+const peakRing=new Float64Array(FLOOR_WIN), peakSort=new Float64Array(FLOOR_WIN);
 
 /* Portrait sources are turned a quarter turn so they fill the 16:9 stage
    instead of sitting letterboxed between two black bars. Flip to -1 if the
@@ -273,8 +284,17 @@ async function startLive(){
   }catch(e){status('Kein Zugriff auf Kamera/Mikrofon: '+e.message+'. Seite über https öffnen und Berechtigung erlauben.',true);return}
   vid.srcObject=S.stream; await vid.play().catch(()=>{});
   if(!vid.videoWidth) await new Promise(r=>vid.onloadedmetadata=r);
-  const st=S.stream.getVideoTracks()[0].getSettings();
-  $('sFps').textContent=st.frameRate?Math.round(st.frameRate):'?';
+  /* The initial ideal:240 is only a request. Ask the track what it can really
+     do and push it to that ceiling — some Android cameras advertise 120 here
+     even though the opening constraint landed on 60. */
+  const track=S.stream.getVideoTracks()[0];
+  try{
+    const max=track.getCapabilities&&track.getCapabilities().frameRate?.max;
+    if(max&&max>(track.getSettings().frameRate||0))
+      await track.applyConstraints({frameRate:{ideal:max}});
+  }catch(e){}
+  const st=track.getSettings(); S.fps=st.frameRate||0;
+  $('sFps').textContent=S.fps?Math.round(S.fps):'?';
   fitVideo(); allocRing();
   const AC=window.AudioContext||window.webkitAudioContext;
   S.actx=new AC(); await S.actx.resume();
@@ -283,11 +303,13 @@ async function startLive(){
   S.analyser=S.actx.createAnalyser();S.analyser.fftSize=2048;
   src.connect(hp);hp.connect(S.analyser);
   S.abuf=new Float32Array(S.analyser.fftSize);
-  S.floor=NOISE_MIN;
+  S.floor=NOISE_MIN; S.peakI=0;
   $('empty').hidden=true;
   ['bArm','bTest'].forEach(b=>$(b).disabled=false);
   $('bStart').textContent='Kamera stoppen';
-  status('Bereit. Scharf schalten und schlagen.');
+  status(S.fps>=120
+    ? 'Bereit. Scharf schalten und schlagen.'
+    : `Bereit, aber die Kamera gibt nur ${Math.round(S.fps)} fps her — ${(1000/S.fps).toFixed(0)} ms pro Frame, zu grob für den Treffmoment. Dafür in der Kamera-App mit 240 fps aufnehmen und über "Video importieren" laden.`);
   frameLoop(); audioLoop();
 }
 function stopLive(){
@@ -331,16 +353,22 @@ function frameLoop(){
 function audioLoop(){
   if(!S.analyser)return;
   S.analyser.getFloatTimeDomainData(S.abuf);
-  const buf=S.abuf, gate=gateLevel();
-  let peak=0,first=-1;
-  for(let i=0;i<buf.length;i++){const a=Math.abs(buf[i]);if(a>peak)peak=a;if(first<0&&a>gate)first=i}
-  // falls fast, climbs slowly, so the crack itself cannot drag the floor up after it
-  S.floor=Math.max(NOISE_MIN, peak<S.floor ? S.floor*.9+peak*.1 : S.floor*.998+peak*.002);
+  const buf=S.abuf;
+  let peak=0;
+  for(let i=0;i<buf.length;i++){const a=Math.abs(buf[i]);if(a>peak)peak=a}
+  // floor before gate, so the gate never rules on a room it has not measured yet
+  peakRing[S.peakI++%FLOOR_WIN]=peak;
+  const n=Math.min(S.peakI,FLOOR_WIN), sc=peakSort.subarray(0,n);
+  sc.set(peakRing.subarray(0,n)); sc.sort();
+  S.floor=Math.max(NOISE_MIN, sc[n>>1]);
+  const gate=gateLevel();
+  let first=-1;
+  for(let i=0;i<buf.length;i++)if(Math.abs(buf[i])>gate){first=i;break}
   $('meterFill').style.width=dbPct(peak)+'%';
   $('meterLab').textContent=peak>1e-4?(20*Math.log10(peak)).toFixed(0)+' dB':'–';
   paintThr();
   const now=performance.now();
-  if(S.armed&&first>=0&&!S.pending&&now-S.lastHit>1500){
+  if(S.armed&&first>=0&&!S.pending&&S.peakI>FLOOR_WIN/4&&now-S.lastHit>1500){
     const tHit=now-(buf.length-first)/S.actx.sampleRate*1000+(+$('off').value);
     trigger(tHit);
   }
@@ -368,6 +396,21 @@ function trigger(tHit){
 }
 
 /* ---------- IMPORT ---------- */
+/* iOS hands a slow-motion clip to a file input with the slowdown already baked
+   in: every captured frame is there, but the timebase reads ~30 fps rather than
+   the 240 fps it was shot at. Stepping by the file's own frame duration still
+   walks one real frame at a time, so only the reported timing is wrong — hence
+   a capture-rate picker instead of a change to the seeking. */
+function fileFps(){return S.frameDur?1/S.frameDur:0}
+function realFps(){return +$('capFps').value || fileFps()}
+function rateNote(){
+  const r=realFps(), f=fileFps();
+  return r/f>1.5
+    ? ` Datei ${Math.round(f)} fps, Aufnahme ${Math.round(r)} fps (Zeitlupe ${Math.round(r/f)}×), Abstand ${(1000/r).toFixed(2)} ms.`
+    : ` ${Math.round(r)} fps, Abstand ${(1000/r).toFixed(2)} ms.`;
+}
+$('capFps').onchange=()=>{if(S.frameDur){$('iFps').textContent=Math.round(realFps());status('Bildrate gesetzt.'+rateNote())}};
+
 $('file').onchange=async e=>{
   const f=e.target.files[0];if(!f)return;
   if(S.fileUrl)URL.revokeObjectURL(S.fileUrl);
@@ -381,7 +424,7 @@ $('file').onchange=async e=>{
   ['bSetHit','bBuild'].forEach(b=>$(b).disabled=false);
   status('Frame-Rate wird gemessen …');
   S.frameDur=await estimateFrameDur(vid);
-  $('iFps').textContent=Math.round(1/S.frameDur);
+  $('iFps').textContent=Math.round(realFps());
   status('Tonspur wird analysiert …');
   try{
     const AC=window.AudioContext||window.webkitAudioContext;const ac=new AC();
@@ -391,7 +434,7 @@ $('file').onchange=async e=>{
     S.hitT=mi/buf.sampleRate+(+$('off').value)/1000;
     $('iHit').textContent=S.hitT.toFixed(3);
     await seek(vid,S.hitT);$('scrub').value=S.hitT;$('oPos').textContent=S.hitT.toFixed(3)+' s';
-    status('Lautester Klick gefunden. Position prüfen, dann Überlagerung erstellen.');
+    status('Lautester Klick gefunden. Position prüfen, dann Überlagerung erstellen.'+rateNote());
   }catch(err){
     status('Tonspur nicht lesbar. Treffer per Schieber suchen und "Treffer = Position" tippen.',true);
   }
@@ -433,7 +476,8 @@ $('bBuild').onclick=async()=>{
   const data=composite(frames,W,H,+$('diff').value);
   showComposite(data,W,H);
   $('iN').textContent=frames.length;$('bBuild').disabled=false;$('bBack2').disabled=false;
-  status(`Fertig: ${frames.length} Frames, je ${(fd*1000).toFixed(1)} ms. Lange drücken zum Sichern.`);
+  const gap=1000/realFps(), span=(frames.length-1)*gap;
+  status(`Fertig: ${frames.length} Frames, je ${gap.toFixed(2)} ms, Fenster ${span.toFixed(1)} ms. Lange drücken zum Sichern.`);
 };
 </script>
 </body>
